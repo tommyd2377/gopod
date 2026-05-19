@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="GoPod">
+  <rect width="64" height="64" fill="#111820"/>
+  <path d="M19 29c9 0 16 7 16 16" fill="none" stroke="#d866ff" stroke-width="6.5" stroke-linecap="round"/>
+  <path d="M19 15.5c17 0 30 13.5 30 29.5" fill="none" stroke="#d866ff" stroke-width="6.5" stroke-linecap="round"/>
+  <circle cx="19" cy="45" r="5" fill="#d866ff"/>
+</svg>
