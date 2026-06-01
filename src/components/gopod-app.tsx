@@ -1423,16 +1423,10 @@ function updateMediaSession(episode: EpisodeWithShow, audio: HTMLAudioElement) {
   });
 
   updateMediaSessionState(audio, audio.paused ? "paused" : "playing");
-  setMediaSessionHandler("play", () => {
-    void audio
-      .play()
-      .then(() => updateMediaSessionState(audio, "playing"))
-      .catch(() => updateMediaSessionState(audio, "paused"));
-  });
-  setMediaSessionHandler("pause", () => {
-    audio.pause();
-    updateMediaSessionState(audio, "paused");
-  });
+  // Keep play/pause on the browser's native media element path so lock-screen
+  // controls can resume audio even when the page is backgrounded.
+  setMediaSessionHandler("play", null);
+  setMediaSessionHandler("pause", null);
   setMediaSessionHandler("seekbackward", (details) => {
     audio.currentTime = Math.max(
       0,
@@ -1496,11 +1490,16 @@ function clearMediaSession() {
 
   navigator.mediaSession.playbackState = "none";
   navigator.mediaSession.metadata = null;
+  setMediaSessionHandler("play", null);
+  setMediaSessionHandler("pause", null);
+  setMediaSessionHandler("seekbackward", null);
+  setMediaSessionHandler("seekforward", null);
+  setMediaSessionHandler("seekto", null);
 }
 
 function setMediaSessionHandler(
   action: MediaSessionAction,
-  handler: MediaSessionActionHandler,
+  handler: MediaSessionActionHandler | null,
 ) {
   try {
     navigator.mediaSession.setActionHandler(action, handler);
