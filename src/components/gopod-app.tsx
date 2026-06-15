@@ -46,6 +46,11 @@ type ActivePlayback = {
   key: string;
 };
 
+type MediaSessionControls = {
+  onPause: MediaSessionActionHandler;
+  onPlay: MediaSessionActionHandler;
+};
+
 type PodcastBackup = {
   app: "GoPod";
   version: typeof BACKUP_VERSION;
@@ -294,7 +299,7 @@ export function GoPodApp() {
       isPaused: false,
       key: episodeKey,
     });
-    updateMediaSession(episode, player);
+    updateActiveMediaSession(episode, player);
 
     try {
       await player.play();
@@ -325,11 +330,13 @@ export function GoPodApp() {
       isPaused: false,
       key: episodeKey,
     });
-    updateMediaSession(episode, player);
+    updateActiveMediaSession(episode, player);
   }
 
   function handlePlayerPause(audio: HTMLAudioElement) {
-    if (!activeEpisodeRef.current) {
+    const episode = activeEpisodeRef.current;
+
+    if (!episode) {
       return;
     }
 
@@ -342,7 +349,7 @@ export function GoPodApp() {
           }
         : currentPlayback,
     );
-    updateMediaSessionState(audio, "paused");
+    updateActiveMediaSession(episode, audio);
   }
 
   function handlePlayerEnded(audio: HTMLAudioElement) {
@@ -394,6 +401,91 @@ export function GoPodApp() {
     updateMediaSessionPosition(audio);
   }
 
+  function updateActiveMediaSession(
+    episode: EpisodeWithShow,
+    audio: HTMLAudioElement,
+  ) {
+    updateMediaSession(episode, audio, {
+      onPause: () => pauseActiveAudio(audio),
+      onPlay: () => {
+        void resumeActiveAudio(audio);
+      },
+    });
+  }
+
+  function pauseActiveAudio(audio = playerRef.current) {
+    const episode = activeEpisodeRef.current;
+
+    if (!audio || !episode) {
+      return;
+    }
+
+    saveActiveProgress(audio, true);
+    audio.pause();
+    setActivePlayback((currentPlayback) =>
+      currentPlayback
+        ? {
+            ...currentPlayback,
+            isPaused: true,
+          }
+        : currentPlayback,
+    );
+    updateActiveMediaSession(episode, audio);
+  }
+
+  async function resumeActiveAudio(audio = playerRef.current) {
+    const episode = activeEpisodeRef.current;
+
+    if (!audio || !episode) {
+      setActivePlayback(null);
+      activeEpisodeKeyRef.current = null;
+      return;
+    }
+
+    const episodeKey = getEpisodeKey(episode);
+    const savedProgress = playback[episodeKey]?.progress ?? 0;
+    const resumeTime = Math.floor(audio.currentTime || savedProgress || 0);
+
+    setError(null);
+    activeEpisodeKeyRef.current = episodeKey;
+
+    if (!audioHasEpisodeSource(audio, episode) || audio.error) {
+      pendingStartTimeRef.current = resumeTime;
+      audio.src = episode.audioUrl;
+      audio.load();
+    } else if (audio.readyState === audio.HAVE_NOTHING) {
+      pendingStartTimeRef.current = resumeTime;
+      audio.load();
+    } else if (audio.ended) {
+      audio.currentTime =
+        savedProgress > 0 &&
+        Number.isFinite(audio.duration) &&
+        savedProgress < audio.duration - 2
+          ? savedProgress
+          : 0;
+    }
+
+    setActivePlayback({
+      episode,
+      isPaused: false,
+      key: episodeKey,
+    });
+    updateActiveMediaSession(episode, audio);
+
+    try {
+      await audio.play();
+      updateMediaSessionState(audio, "playing");
+    } catch {
+      setActivePlayback({
+        episode,
+        isPaused: true,
+        key: episodeKey,
+      });
+      updateActiveMediaSession(episode, audio);
+      setError("Unable to resume playback.");
+    }
+  }
+
   function toggleActivePlayback() {
     const player = playerRef.current;
 
@@ -404,13 +496,11 @@ export function GoPodApp() {
     }
 
     if (player.paused) {
-      void player.play().catch(() => {
-        setError("Unable to resume playback.");
-      });
+      void resumeActiveAudio(player);
       return;
     }
 
-    player.pause();
+    pauseActiveAudio(player);
   }
 
   function jumpToActiveEpisode() {
@@ -1399,7 +1489,11 @@ function formatDuration(duration: string) {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
-function updateMediaSession(episode: EpisodeWithShow, audio: HTMLAudioElement) {
+function updateMediaSession(
+  episode: EpisodeWithShow,
+  audio: HTMLAudioElement,
+  controls: MediaSessionControls,
+) {
   if (!("mediaSession" in navigator) || typeof MediaMetadata === "undefined") {
     return;
   }
@@ -1423,10 +1517,8 @@ function updateMediaSession(episode: EpisodeWithShow, audio: HTMLAudioElement) {
   });
 
   updateMediaSessionState(audio, audio.paused ? "paused" : "playing");
-  // Keep play/pause on the browser's native media element path so lock-screen
-  // controls can resume audio even when the page is backgrounded.
-  setMediaSessionHandler("play", null);
-  setMediaSessionHandler("pause", null);
+  setMediaSessionHandler("play", controls.onPlay);
+  setMediaSessionHandler("pause", controls.onPause);
   setMediaSessionHandler("seekbackward", (details) => {
     audio.currentTime = Math.max(
       0,
@@ -1505,6 +1597,28 @@ function setMediaSessionHandler(
     navigator.mediaSession.setActionHandler(action, handler);
   } catch {
     // Unsupported lock-screen actions can be ignored; native audio still works.
+  }
+}
+
+function audioHasEpisodeSource(audio: HTMLAudioElement, episode: EpisodeWithShow) {
+  const currentSource = audio.currentSrc || audio.src;
+
+  if (!currentSource) {
+    return false;
+  }
+
+  return normalizeMediaUrl(currentSource) === normalizeMediaUrl(episode.audioUrl);
+}
+
+function normalizeMediaUrl(url: string) {
+  if (typeof window === "undefined") {
+    return url;
+  }
+
+  try {
+    return new URL(url, window.location.href).href;
+  } catch {
+    return url;
   }
 }
 
