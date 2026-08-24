@@ -515,8 +515,8 @@ img {
 
 .scroll-top-button {
   position: fixed;
-  right: max(16px, env(safe-area-inset-right));
-  bottom: calc(18px + env(safe-area-inset-bottom));
+  bottom: calc(56px + env(safe-area-inset-bottom));
+  left: 50%;
   z-index: 20;
   min-height: 50px;
   border: 1px solid rgba(216, 102, 255, 0.54);
@@ -526,6 +526,7 @@ img {
   font-size: 0.95rem;
   font-weight: 900;
   padding: 0 18px;
+  transform: translateX(-50%);
 }
 
 .scroll-top-button:hover {
@@ -672,11 +673,6 @@ img {
 
   .episode-card h3 {
     font-size: 1.34rem;
-  }
-
-  .scroll-top-button {
-    right: 24px;
-    bottom: 24px;
   }
 
   .scroll-top-button.with-now-playing {
