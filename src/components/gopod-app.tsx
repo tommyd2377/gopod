@@ -6,6 +6,7 @@ import {
   type ChangeEvent,
   type FormEvent,
   type RefObject,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -29,6 +30,7 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const AUTO_REFRESH_STALE_MS = 15 * 60 * 1000;
 const FEED_REFRESH_CONCURRENCY = 4;
 const PROGRESS_SAVE_INTERVAL_MS = 10_000;
+const SKIP_SECONDS = 30;
 
 type FeedCache = Record<string, ParsedFeed>;
 type PlaybackMap = Record<string, EpisodePlaybackState>;
@@ -66,6 +68,10 @@ export function GoPodApp() {
   const [feeds, setFeeds] = useState<SavedFeed[]>([]);
   const [cache, setCache] = useState<FeedCache>({});
   const [playback, setPlayback] = useState<PlaybackMap>({});
+  const playbackRef = useRef<PlaybackMap>({});
+  const [selectedEpisode, setSelectedEpisode] = useState<EpisodeWithShow | null>(null);
+  const detailHistoryRestoredRef = useRef(false);
+  const listReturnRef = useRef<{ scrollY: number; episodeKey: string } | null>(null);
   const [selectedView, setSelectedView] = useState<ViewKey>(ALL_EPISODES_VIEW);
   const [episodeLimit, setEpisodeLimit] = useState(EPISODE_BATCH_SIZE);
   const [isAdding, setIsAdding] = useState(false);
@@ -99,7 +105,8 @@ export function GoPodApp() {
       setCache(
         pruneFeedCacheToRecentEpisodes(readStorage<FeedCache>(CACHE_KEY, {})),
       );
-      setPlayback(readStorage<PlaybackMap>(PLAYBACK_KEY, {}));
+      playbackRef.current = readStorage<PlaybackMap>(PLAYBACK_KEY, {});
+      setPlayback(playbackRef.current);
       setHydrated(true);
     });
 
@@ -120,11 +127,6 @@ export function GoPodApp() {
     }
   }, [cache, hydrated]);
 
-  useEffect(() => {
-    if (hydrated) {
-      writeStorage(PLAYBACK_KEY, playback);
-    }
-  }, [playback, hydrated]);
 
   useEffect(() => {
     if (!hydrated || autoRefreshStartedRef.current) {
@@ -182,10 +184,16 @@ export function GoPodApp() {
     };
   }, []);
 
-  function saveActiveProgress(audio: HTMLAudioElement, force = false) {
+  const storePlayback = useCallback((nextPlayback: PlaybackMap) => {
+    playbackRef.current = nextPlayback;
+    writeStorage(PLAYBACK_KEY, nextPlayback);
+    setPlayback(nextPlayback);
+  }, []);
+
+  const saveActiveProgress = useCallback((audio: HTMLAudioElement, force = false) => {
     const episode = activeEpisodeRef.current;
 
-    if (!episode) {
+    if (!episode || pendingStartTimeRef.current !== null) {
       return;
     }
 
@@ -197,8 +205,9 @@ export function GoPodApp() {
 
     lastProgressSavedAtRef.current = now;
     const episodeKey = getEpisodeKey(episode);
+    const currentPlayback = playbackRef.current;
 
-    setPlayback((currentPlayback) => ({
+    storePlayback({
       ...currentPlayback,
       [episodeKey]: {
         ...currentPlayback[episodeKey],
@@ -208,8 +217,29 @@ export function GoPodApp() {
           : currentPlayback[episodeKey]?.duration,
         updatedAt: new Date().toISOString(),
       },
-    }));
-  }
+    });
+  }, [storePlayback]);
+
+  useEffect(() => {
+    function saveBeforeLeaving() {
+      if (playerRef.current) {
+        saveActiveProgress(playerRef.current, true);
+      }
+    }
+
+    function saveWhenHidden() {
+      if (document.visibilityState === "hidden") {
+        saveBeforeLeaving();
+      }
+    }
+
+    window.addEventListener("pagehide", saveBeforeLeaving);
+    document.addEventListener("visibilitychange", saveWhenHidden);
+    return () => {
+      window.removeEventListener("pagehide", saveBeforeLeaving);
+      document.removeEventListener("visibilitychange", saveWhenHidden);
+    };
+  }, [saveActiveProgress]);
 
   function pauseAndClearActiveAudio() {
     const player = playerRef.current;
@@ -267,6 +297,61 @@ export function GoPodApp() {
     feeds.length > 0 &&
     visibleEpisodes.length > 0 &&
     isActivelyLoadingEpisodes;
+
+  useEffect(() => {
+    function restoreView() {
+      const key = window.history.state?.gopodEpisodeKey;
+      setSelectedEpisode(
+        allEpisodes.find((episode) => getEpisodeKey(episode) === key) ??
+          (activeEpisodeKeyRef.current === key ? activeEpisodeRef.current : null),
+      );
+    }
+
+    if (hydrated && !detailHistoryRestoredRef.current) {
+      detailHistoryRestoredRef.current = true;
+      restoreView();
+    }
+    window.addEventListener("popstate", restoreView);
+    return () => window.removeEventListener("popstate", restoreView);
+  }, [allEpisodes, hydrated]);
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      if (selectedEpisode) {
+        window.scrollTo({ top: 0, behavior: "instant" });
+        document.getElementById("episode-detail-title")?.focus({ preventScroll: true });
+      } else if (listReturnRef.current) {
+        const { scrollY, episodeKey } = listReturnRef.current;
+        window.scrollTo({ top: scrollY, behavior: "instant" });
+        document.getElementById(`${getEpisodeElementId(episodeKey)}-details`)
+          ?.focus({ preventScroll: true });
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [selectedEpisode]);
+
+  function openEpisodeDetails(episode: EpisodeWithShow) {
+    const episodeKey = getEpisodeKey(episode);
+    if (!selectedEpisode) {
+      listReturnRef.current = { scrollY: window.scrollY, episodeKey };
+    }
+    const nextState = { ...window.history.state, gopodEpisodeKey: episodeKey };
+    const url = `#${getEpisodeElementId(episodeKey)}`;
+    if (selectedEpisode) {
+      window.history.replaceState(nextState, "", url);
+    } else {
+      window.history.pushState(nextState, "", url);
+    }
+    setSelectedEpisode(episode);
+  }
+
+  function closeEpisodeDetails() {
+    if (window.history.state?.gopodEpisodeKey) {
+      window.history.back();
+    } else {
+      setSelectedEpisode(null);
+    }
+  }
 
   async function playEpisode(episode: EpisodeWithShow) {
     const player = playerRef.current;
@@ -358,16 +443,20 @@ export function GoPodApp() {
     if (episode) {
       const episodeKey = getEpisodeKey(episode);
 
-      setPlayback((currentPlayback) => ({
+      const currentPlayback = playbackRef.current;
+      const duration = Math.floor(
+        Number.isFinite(audio.duration) ? audio.duration : audio.currentTime || 0,
+      );
+      storePlayback({
         ...currentPlayback,
         [episodeKey]: {
           ...currentPlayback[episodeKey],
           played: true,
-          progress: Math.floor(audio.duration || 0),
-          duration: Math.floor(audio.duration || 0),
+          progress: duration,
+          duration,
           updatedAt: new Date().toISOString(),
         },
-      }));
+      });
     }
 
     updateMediaSessionState(audio, "none");
@@ -504,40 +593,9 @@ export function GoPodApp() {
   }
 
   function jumpToActiveEpisode() {
-    const activeEpisodeKey = activeEpisodeKeyRef.current;
-
-    if (!activeEpisodeKey) {
-      return;
+    if (activeEpisodeRef.current) {
+      openEpisodeDetails(activeEpisodeRef.current);
     }
-
-    const scrollToEpisode = () => {
-      const episodeElement = document.getElementById(
-        getEpisodeElementId(activeEpisodeKey),
-      );
-
-      if (!episodeElement) {
-        return false;
-      }
-
-      episodeElement.scrollIntoView({
-        behavior: "smooth",
-        block: "center",
-      });
-      return true;
-    };
-
-    if (scrollToEpisode()) {
-      return;
-    }
-
-    const activeEpisode = activeEpisodeRef.current;
-
-    if (!activeEpisode) {
-      return;
-    }
-
-    selectView(activeEpisode.feedUrl);
-    window.setTimeout(scrollToEpisode, 220);
   }
 
   async function addFeed(event: FormEvent<HTMLFormElement>) {
@@ -663,22 +721,6 @@ export function GoPodApp() {
     setError(null);
   }
 
-  function updatePlayback(
-    episode: ParsedEpisode,
-    nextState: EpisodePlaybackState,
-  ) {
-    const key = getEpisodeKey(episode);
-
-    setPlayback((currentPlayback) => ({
-      ...currentPlayback,
-      [key]: {
-        ...currentPlayback[key],
-        ...nextState,
-        updatedAt: new Date().toISOString(),
-      },
-    }));
-  }
-
   function selectView(view: ViewKey) {
     if (viewSwitchTimerRef.current) {
       clearTimeout(viewSwitchTimerRef.current);
@@ -749,7 +791,7 @@ export function GoPodApp() {
 
       setFeeds([...backup.podcastFeeds].sort(sortFeedsByTitle));
       setCache(backup.podcastEpisodesCache);
-      setPlayback(backup.podcastPlaybackState);
+      storePlayback(backup.podcastPlaybackState);
       setSelectedView(ALL_EPISODES_VIEW);
       setEpisodeLimit(EPISODE_BATCH_SIZE);
       setMessage(`Imported ${backup.podcastFeeds.length} saved feeds.`);
@@ -767,6 +809,7 @@ export function GoPodApp() {
 
   return (
     <main className={`app-shell ${activePlayback ? "has-now-playing" : ""}`}>
+      <div hidden={Boolean(selectedEpisode)}>
       <header className="app-header">
         <div>
           <p className="eyebrow">Local RSS player</p>
@@ -972,7 +1015,7 @@ export function GoPodApp() {
                 episode={episode}
                 key={`${episode.feedUrl}:${getEpisodeKey(episode)}`}
                 onPlayEpisode={playEpisode}
-                onPlaybackChange={updatePlayback}
+                onOpenDetails={openEpisodeDetails}
                 onToggleActivePlayback={toggleActivePlayback}
                 playbackState={playback[getEpisodeKey(episode)]}
               />
@@ -998,7 +1041,23 @@ export function GoPodApp() {
         </section>
       </div>
 
-      {showScrollTop && (
+      </div>
+
+      {selectedEpisode && error && (
+        <p className="notice error-notice" role="alert">{error}</p>
+      )}
+      {selectedEpisode && (
+        <EpisodeDetails
+          activePlayback={activePlayback}
+          episode={selectedEpisode}
+          onBack={closeEpisodeDetails}
+          onPlayEpisode={playEpisode}
+          onToggleActivePlayback={toggleActivePlayback}
+          playbackState={playback[getEpisodeKey(selectedEpisode)]}
+        />
+      )}
+
+      {showScrollTop && !selectedEpisode && (
         <button
           aria-label="Scroll to top"
           className={`scroll-top-button ${
@@ -1019,6 +1078,7 @@ export function GoPodApp() {
         onAudioPause={handlePlayerPause}
         onAudioPlay={handlePlayerPlay}
         onAudioTimeUpdate={handlePlayerTimeUpdate}
+        onAudioSeeked={(audio) => saveActiveProgress(audio, true)}
         onJump={jumpToActiveEpisode}
         onTogglePlayback={toggleActivePlayback}
       />
@@ -1044,94 +1104,175 @@ function BrandTitle() {
   );
 }
 
+function PlaybackIcon({ paused }: { paused: boolean }) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+      {paused ? <path d="M8 4.5v15l12-7.5z" /> : <path d="M6 4h4v16H6zm8 0h4v16h-4z" />}
+    </svg>
+  );
+}
+
+function EpisodeArt({ episode, className = "" }: {
+  episode: EpisodeWithShow;
+  className?: string;
+}) {
+  const [failedUrls, setFailedUrls] = useState<string[]>([]);
+  const imageUrl = [episode.imageUrl, episode.showImageUrl].find(
+    (url) => url && !failedUrls.includes(url),
+  );
+
+  return imageUrl ? (
+    <img
+      alt=""
+      className={`episode-art ${className}`}
+      loading="lazy"
+      onError={() => setFailedUrls((current) => [...current, imageUrl])}
+      src={imageUrl}
+    />
+  ) : (
+    <span aria-hidden="true" className={`episode-art text-art ${className}`}>
+      {episode.showTitle.slice(0, 2)}
+    </span>
+  );
+}
+
+function EpisodeTime({ episode, playbackState }: {
+  episode: ParsedEpisode;
+  playbackState?: EpisodePlaybackState;
+}) {
+  const duration = playbackState?.duration || parseDuration(episode.duration);
+  return (
+    <span className="episode-time">
+      {formatProgress(playbackState?.progress ?? 0)} / {duration ? formatProgress(duration) : "—"}
+      <span className="time-caption"> listened</span>
+    </span>
+  );
+}
+
+function EpisodePlayButton({ activePlayback, episode, playbackState, onPlayEpisode, onToggleActivePlayback }: {
+  activePlayback: ActivePlayback | null;
+  episode: EpisodeWithShow;
+  playbackState?: EpisodePlaybackState;
+  onPlayEpisode: (episode: EpisodeWithShow) => void;
+  onToggleActivePlayback: () => void;
+}) {
+  const isCurrentEpisode = activePlayback?.key === getEpisodeKey(episode);
+  const isPlaying = isCurrentEpisode && !activePlayback?.isPaused;
+  const label = getEpisodePlayLabel(isCurrentEpisode, activePlayback, playbackState);
+  return (
+    <button
+      aria-label={`${label} ${episode.title}`}
+      className="button primary-button episode-play-button"
+      onClick={() => isPlaying ? onToggleActivePlayback() : onPlayEpisode(episode)}
+      title={label}
+      type="button"
+    >
+      <PlaybackIcon paused={!isPlaying} />
+    </button>
+  );
+}
+
 function EpisodeCard({
-  activePlayback,
-  episode,
-  onPlayEpisode,
-  onPlaybackChange,
-  onToggleActivePlayback,
-  playbackState,
+  activePlayback, episode, onPlayEpisode, onOpenDetails,
+  onToggleActivePlayback, playbackState,
 }: {
   activePlayback: ActivePlayback | null;
   episode: EpisodeWithShow;
   onPlayEpisode: (episode: EpisodeWithShow) => void;
-  onPlaybackChange: (
-    episode: ParsedEpisode,
-    nextState: EpisodePlaybackState,
-  ) => void;
+  onOpenDetails: (episode: EpisodeWithShow) => void;
   onToggleActivePlayback: () => void;
   playbackState?: EpisodePlaybackState;
 }) {
   const description = getDescriptionPreview(episode.description);
-  const episodeKey = getEpisodeKey(episode);
-  const played = Boolean(playbackState?.played);
-  const isCurrentEpisode = activePlayback?.key === episodeKey;
-
-  function toggleEpisodePlayback() {
-    if (isCurrentEpisode && !activePlayback?.isPaused) {
-      onToggleActivePlayback();
-      return;
-    }
-
-    void onPlayEpisode(episode);
-  }
-
+  const episodeId = getEpisodeElementId(getEpisodeKey(episode));
   return (
-    <article
-      className={`episode-card ${played ? "played-card" : ""}`}
-      id={getEpisodeElementId(episodeKey)}
-    >
-      <div className="episode-meta">
-        <span>{episode.showTitle}</span>
-        <span>{formatDate(episode.pubDate)}</span>
-        {episode.duration && <span>{formatDuration(episode.duration)}</span>}
+    <article className="episode-card" id={episodeId}>
+      <div className="episode-card-heading">
+        <EpisodeArt episode={episode} />
+        <div className="episode-card-copy">
+          <p className="episode-show">{episode.showTitle}</p>
+          <div className="episode-meta">
+            <span>{formatDate(episode.pubDate)}</span>
+            <EpisodeTime episode={episode} playbackState={playbackState} />
+          </div>
+        </div>
       </div>
-
-      <h3>{episode.title}</h3>
+      <h3>
+        <button className="episode-title-button" onClick={() => onOpenDetails(episode)} type="button">
+          {episode.title}
+        </button>
+      </h3>
       {description && <p className="episode-description">{description}</p>}
-
       <div className="episode-actions">
+        <EpisodePlayButton
+          activePlayback={activePlayback} episode={episode} playbackState={playbackState}
+          onPlayEpisode={onPlayEpisode} onToggleActivePlayback={onToggleActivePlayback}
+        />
         <button
-          className={`button compact-button ${
-            isCurrentEpisode && !activePlayback?.isPaused ? "played-button" : ""
-          }`}
-          onClick={toggleEpisodePlayback}
+          aria-label={`View details for ${episode.title}`}
+          className="text-button episode-details-button"
+          id={`${episodeId}-details`}
+          onClick={() => onOpenDetails(episode)}
           type="button"
         >
-          {getEpisodePlayLabel(isCurrentEpisode, activePlayback, playbackState)}
+          Episode details <span aria-hidden="true">→</span>
         </button>
-        <button
-          aria-pressed={played}
-          className={`button compact-button ${played ? "played-button" : ""}`}
-          onClick={() =>
-            onPlaybackChange(episode, {
-              played: !played,
-            })
-          }
-          type="button"
-        >
-          {played ? "Played" : "Unplayed"}
-        </button>
-        {playbackState?.progress ? (
-          <span className="progress-note">
-            {formatProgress(playbackState.progress)}
-          </span>
-        ) : null}
       </div>
     </article>
   );
 }
 
+function EpisodeDetails({ activePlayback, episode, onBack, onPlayEpisode, onToggleActivePlayback, playbackState }: {
+  activePlayback: ActivePlayback | null;
+  episode: EpisodeWithShow;
+  onBack: () => void;
+  onPlayEpisode: (episode: EpisodeWithShow) => void;
+  onToggleActivePlayback: () => void;
+  playbackState?: EpisodePlaybackState;
+}) {
+  return (
+    <section className="episode-detail" aria-labelledby="episode-detail-title">
+      <button className="button secondary-button detail-back-button" onClick={onBack} type="button">
+        <span aria-hidden="true">←</span> Back to episodes
+      </button>
+      <div className="episode-detail-heading">
+        <EpisodeArt episode={episode} className="episode-detail-art" />
+        <div>
+          <p className="eyebrow">{episode.showTitle}</p>
+          <h1 id="episode-detail-title" tabIndex={-1}>{episode.title}</h1>
+          <div className="episode-meta">
+            <span>{formatDate(episode.pubDate)}</span>
+            <EpisodeTime episode={episode} playbackState={playbackState} />
+          </div>
+          <div className="episode-actions">
+            <EpisodePlayButton
+              activePlayback={activePlayback} episode={episode} playbackState={playbackState}
+              onPlayEpisode={onPlayEpisode} onToggleActivePlayback={onToggleActivePlayback}
+            />
+          </div>
+        </div>
+      </div>
+      <div className="episode-full-description">
+        {getDescriptionText(episode.description) || "No description available for this episode."}
+      </div>
+    </section>
+  );
+}
+
+function SkipIcon({ forward = false }: { forward?: boolean }) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 32 32" focusable="false">
+      <g transform={forward ? "translate(32 0) scale(-1 1)" : undefined}>
+        <path d="M9 8a11 11 0 1 1-3.5 10M9 3v7H2" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+      </g>
+      <text x="16" y="22" textAnchor="middle" fill="currentColor" fontSize="12" fontWeight="800">30</text>
+    </svg>
+  );
+}
+
 function NowPlayingBar({
-  activePlayback,
-  audioRef,
-  onAudioEnded,
-  onAudioLoadedMetadata,
-  onAudioPause,
-  onAudioPlay,
-  onAudioTimeUpdate,
-  onJump,
-  onTogglePlayback,
+  activePlayback, audioRef, onAudioEnded, onAudioLoadedMetadata, onAudioPause,
+  onAudioPlay, onAudioTimeUpdate, onAudioSeeked, onJump, onTogglePlayback,
 }: {
   activePlayback: ActivePlayback | null;
   audioRef: RefObject<HTMLAudioElement | null>;
@@ -1140,49 +1281,67 @@ function NowPlayingBar({
   onAudioPause: (audio: HTMLAudioElement) => void;
   onAudioPlay: () => void;
   onAudioTimeUpdate: (audio: HTMLAudioElement) => void;
+  onAudioSeeked: (audio: HTMLAudioElement) => void;
   onJump: () => void;
   onTogglePlayback: () => void;
 }) {
+  const [position, setPosition] = useState(0);
+  const [duration, setDuration] = useState(0);
+
+  function syncPosition(audio: HTMLAudioElement) {
+    setPosition(audio.currentTime || 0);
+    setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
+  }
+
+  function seekTo(seconds: number) {
+    const audio = audioRef.current;
+    if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) {
+      return;
+    }
+    audio.currentTime = Math.max(0, Math.min(audio.duration, seconds));
+    syncPosition(audio);
+    onAudioSeeked(audio);
+  }
+
   return (
-    <aside
-      aria-hidden={!activePlayback}
-      aria-label="Now playing"
-      className="now-playing-bar"
-      hidden={!activePlayback}
-    >
-      <div className="now-playing-copy">
+    <aside aria-label="Now playing" className="now-playing-bar" hidden={!activePlayback}>
+      <button className="now-playing-copy" disabled={!activePlayback} onClick={onJump} type="button"
+        aria-label={`View details for ${activePlayback?.episode.title ?? "current episode"}`}>
         <span>{activePlayback?.episode.showTitle ?? "GoPod"}</span>
         <strong>{activePlayback?.episode.title ?? "No episode selected"}</strong>
-      </div>
+      </button>
       <div className="now-playing-actions">
-        <button
-          className="text-button"
-          disabled={!activePlayback}
-          onClick={onJump}
-          type="button"
-        >
-          Jump
+        <button aria-label="Back 30 seconds" className="player-skip-button" disabled={!activePlayback || !duration}
+          onClick={() => seekTo((audioRef.current?.currentTime ?? 0) - SKIP_SECONDS)} type="button">
+          <SkipIcon />
         </button>
-        <button
-          className="button compact-button"
-          disabled={!activePlayback}
-          onClick={onTogglePlayback}
-          type="button"
-        >
-          {activePlayback?.isPaused ? "Resume" : "Pause"}
+        <button aria-label={activePlayback?.isPaused ? "Resume playback" : "Pause playback"}
+          className="button primary-button player-play-button" disabled={!activePlayback}
+          onClick={onTogglePlayback} type="button">
+          <PlaybackIcon paused={activePlayback?.isPaused ?? true} />
         </button>
+        <button aria-label="Forward 30 seconds" className="player-skip-button" disabled={!activePlayback || !duration}
+          onClick={() => seekTo((audioRef.current?.currentTime ?? 0) + SKIP_SECONDS)} type="button">
+          <SkipIcon forward />
+        </button>
+      </div>
+      <div className="player-timeline">
+        <span>{formatProgress(position)}</span>
+        <input aria-label="Playback position" aria-valuetext={`${formatProgress(position)} of ${formatProgress(duration)}`}
+          disabled={!duration} max={duration || 1} min={0} onChange={(event) => seekTo(Number(event.target.value))}
+          step={1} type="range" value={Math.min(position, duration)} />
+        <span>{formatProgress(duration)}</span>
       </div>
       <audio
-        className="global-audio-player"
-        controls
+        onDurationChange={(event) => syncPosition(event.currentTarget)}
+        onEmptied={(event) => syncPosition(event.currentTarget)}
         onEnded={(event) => onAudioEnded(event.currentTarget)}
-        onLoadedMetadata={(event) => onAudioLoadedMetadata(event.currentTarget)}
+        onLoadedMetadata={(event) => { onAudioLoadedMetadata(event.currentTarget); syncPosition(event.currentTarget); }}
         onPause={(event) => onAudioPause(event.currentTarget)}
         onPlay={onAudioPlay}
-        onTimeUpdate={(event) => onAudioTimeUpdate(event.currentTarget)}
-        playsInline
-        preload="none"
-        ref={audioRef}
+        onSeeked={(event) => { syncPosition(event.currentTarget); onAudioSeeked(event.currentTarget); }}
+        onTimeUpdate={(event) => { syncPosition(event.currentTarget); onAudioTimeUpdate(event.currentTarget); }}
+        playsInline preload="none" ref={audioRef}
       />
     </aside>
   );
@@ -1463,30 +1622,20 @@ function formatDate(pubDate?: string) {
 }
 
 function formatProgress(seconds: number) {
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = Math.floor(seconds % 60);
-  return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
-}
-
-function formatDuration(duration: string) {
-  const trimmedDuration = duration.trim();
-
-  if (!/^\d+$/.test(trimmedDuration)) {
-    return trimmedDuration;
-  }
-
-  const totalSeconds = Number(trimmedDuration);
+  const totalSeconds = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
+  const remainder = (totalSeconds % 60).toString().padStart(2, "0");
+  return hours > 0
+    ? `${hours}:${minutes.toString().padStart(2, "0")}:${remainder}`
+    : `${minutes}:${remainder}`;
+}
 
-  if (hours > 0) {
-    return `${hours}:${minutes.toString().padStart(2, "0")}:${seconds
-      .toString()
-      .padStart(2, "0")}`;
+function parseDuration(duration?: string) {
+  if (!duration || !/^\d+(?::[0-5]?\d){0,2}$/.test(duration.trim())) {
+    return 0;
   }
-
-  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+  return duration.trim().split(":").reduce((total, part) => total * 60 + Number(part), 0);
 }
 
 function updateMediaSession(
@@ -1522,12 +1671,12 @@ function updateMediaSession(
   setMediaSessionHandler("seekbackward", (details) => {
     audio.currentTime = Math.max(
       0,
-      audio.currentTime - (details.seekOffset ?? 10),
+      audio.currentTime - (details.seekOffset ?? SKIP_SECONDS),
     );
     updateMediaSessionPosition(audio);
   });
   setMediaSessionHandler("seekforward", (details) => {
-    const nextTime = audio.currentTime + (details.seekOffset ?? 10);
+    const nextTime = audio.currentTime + (details.seekOffset ?? SKIP_SECONDS);
     audio.currentTime = Number.isFinite(audio.duration)
       ? Math.min(audio.duration, nextTime)
       : nextTime;
@@ -1622,16 +1771,25 @@ function normalizeMediaUrl(url: string) {
   }
 }
 
-function getDescriptionPreview(description?: string) {
-  if (!description) {
-    return "";
-  }
-
-  const plainText = description
+function getDescriptionText(description?: string) {
+  return (description ?? "")
+    .replace(/<br\s*\/?\s*>|<\/(?:p|div|li|h[1-6])>/gi, "\n\n")
     .replace(/<[^>]*>/g, " ")
-    .replace(/\s+/g, " ")
+    .replace(/&#(x[0-9a-f]+|[0-9]+);|&(amp|lt|gt|quot|apos|nbsp);/gi, (match, code: string | undefined, name: string | undefined) => {
+      if (code) {
+        const value = code[0].toLowerCase() === "x" ? parseInt(code.slice(1), 16) : Number(code);
+        return value > 0 && value <= 0x10ffff ? String.fromCodePoint(value) : match;
+      }
+      return ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " } as Record<string, string>)[name!.toLowerCase()] ?? match;
+    })
+    .replace(/[^\S\n]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
 
+function getDescriptionPreview(description?: string) {
+  const plainText = getDescriptionText(description).replace(/\s+/g, " ");
   return plainText.length > 220 ? `${plainText.slice(0, 217)}...` : plainText;
 }
 
