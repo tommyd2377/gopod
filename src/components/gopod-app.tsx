@@ -1057,7 +1057,7 @@ export function GoPodApp() {
         />
       )}
 
-      {showScrollTop && !selectedEpisode && (
+      {showScrollTop && (
         <button
           aria-label="Scroll to top"
           className={`scroll-top-button ${
@@ -1198,7 +1198,13 @@ function EpisodeCard({
         </div>
       </div>
       <h3>
-        <button className="episode-title-button" onClick={() => onOpenDetails(episode)} type="button">
+        <button
+          aria-label={`View details for ${episode.title}`}
+          className="episode-title-button"
+          id={`${episodeId}-details`}
+          onClick={() => onOpenDetails(episode)}
+          type="button"
+        >
           {episode.title}
         </button>
       </h3>
@@ -1208,15 +1214,6 @@ function EpisodeCard({
           activePlayback={activePlayback} episode={episode} playbackState={playbackState}
           onPlayEpisode={onPlayEpisode} onToggleActivePlayback={onToggleActivePlayback}
         />
-        <button
-          aria-label={`View details for ${episode.title}`}
-          className="text-button episode-details-button"
-          id={`${episodeId}-details`}
-          onClick={() => onOpenDetails(episode)}
-          type="button"
-        >
-          Episode details <span aria-hidden="true">→</span>
-        </button>
       </div>
     </article>
   );
@@ -1232,8 +1229,8 @@ function EpisodeDetails({ activePlayback, episode, onBack, onPlayEpisode, onTogg
 }) {
   return (
     <section className="episode-detail" aria-labelledby="episode-detail-title">
-      <button className="button secondary-button detail-back-button" onClick={onBack} type="button">
-        <span aria-hidden="true">←</span> Back to episodes
+      <button className="button primary-button detail-back-button" onClick={onBack} type="button">
+        <span aria-hidden="true">←</span> Back
       </button>
       <div className="episode-detail-heading">
         <EpisodeArt episode={episode} className="episode-detail-art" />

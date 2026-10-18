@@ -414,6 +414,7 @@ img {
 }
 
 .episode-card {
+  position: relative;
   border: 1px solid var(--border);
   border-radius: 24px;
   background: var(--surface);
@@ -633,8 +634,33 @@ img {
   overflow-wrap: anywhere;
 }
 
+.episode-title-button::after {
+  position: absolute;
+  inset: 0;
+  border-radius: 24px;
+  content: "";
+}
+
 .episode-title-button:hover {
   color: var(--accent);
+}
+
+.episode-title-button:focus-visible {
+  outline: none;
+}
+
+.episode-title-button:focus-visible::after {
+  outline: 3px solid var(--accent);
+  outline-offset: 4px;
+}
+
+.episode-card .episode-actions {
+  justify-content: center;
+}
+
+.episode-card .episode-play-button {
+  position: relative;
+  z-index: 1;
 }
 
 .episode-play-button,
@@ -686,11 +712,6 @@ img {
   height: 100%;
 }
 
-.episode-details-button {
-  min-height: 48px;
-  margin-left: auto;
-}
-
 .player-timeline {
   display: flex;
   grid-column: 1 / -1;
@@ -721,24 +742,29 @@ img {
 }
 
 .detail-back-button {
-  margin-bottom: 28px;
+  min-height: 44px;
+  border-radius: 14px;
+  margin-bottom: 20px;
+  padding: 0 16px;
 }
 
 .episode-detail-heading {
   display: grid;
-  gap: 22px;
+  grid-template-columns: 88px minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
 }
 
 .episode-detail-art {
-  width: min(55vw, 200px);
+  width: 100%;
   height: auto;
   aspect-ratio: 1;
-  border-radius: 24px;
+  border-radius: 18px;
 }
 
 .episode-detail h1 {
   margin: 0 0 16px;
-  font-size: clamp(1.7rem, 4vw, 2.6rem);
+  font-size: clamp(1.4rem, 4vw, 2.3rem);
   line-height: 1.15;
   overflow-wrap: anywhere;
 }
@@ -754,7 +780,6 @@ img {
   overflow-wrap: anywhere;
 }
 
-.episode-title-button:focus-visible,
 .now-playing-copy:focus-visible,
 .player-skip-button:focus-visible,
 .player-timeline input:focus-visible {
@@ -804,8 +829,8 @@ img {
   }
 
   .episode-detail-heading {
-    grid-template-columns: 200px minmax(0, 1fr);
-    align-items: start;
+    grid-template-columns: 144px minmax(0, 1fr);
+    gap: 24px;
   }
 }
 
