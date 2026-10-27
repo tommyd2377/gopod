@@ -808,7 +808,7 @@ export function GoPodApp() {
   }
 
   return (
-    <main className={`app-shell ${activePlayback ? "has-now-playing" : ""}`}>
+    <main className="app-shell">
       <div hidden={Boolean(selectedEpisode)}>
       <header className="app-header">
         <div>
@@ -1057,19 +1057,6 @@ export function GoPodApp() {
         />
       )}
 
-      {showScrollTop && (
-        <button
-          aria-label="Scroll to top"
-          className={`scroll-top-button ${
-            activePlayback ? "with-now-playing" : ""
-          }`}
-          onClick={scrollToTop}
-          type="button"
-        >
-          Top
-        </button>
-      )}
-
       <NowPlayingBar
         activePlayback={activePlayback}
         audioRef={playerRef}
@@ -1081,6 +1068,8 @@ export function GoPodApp() {
         onAudioSeeked={(audio) => saveActiveProgress(audio, true)}
         onJump={jumpToActiveEpisode}
         onTogglePlayback={toggleActivePlayback}
+        onScrollToTop={scrollToTop}
+        showScrollTop={showScrollTop}
       />
     </main>
   );
@@ -1196,6 +1185,10 @@ function EpisodeCard({
             <EpisodeTime episode={episode} playbackState={playbackState} />
           </div>
         </div>
+        <EpisodePlayButton
+          activePlayback={activePlayback} episode={episode} playbackState={playbackState}
+          onPlayEpisode={onPlayEpisode} onToggleActivePlayback={onToggleActivePlayback}
+        />
       </div>
       <h3>
         <button
@@ -1209,12 +1202,6 @@ function EpisodeCard({
         </button>
       </h3>
       {description && <p className="episode-description">{description}</p>}
-      <div className="episode-actions">
-        <EpisodePlayButton
-          activePlayback={activePlayback} episode={episode} playbackState={playbackState}
-          onPlayEpisode={onPlayEpisode} onToggleActivePlayback={onToggleActivePlayback}
-        />
-      </div>
     </article>
   );
 }
@@ -1236,19 +1223,17 @@ function EpisodeDetails({ activePlayback, episode, onBack, onPlayEpisode, onTogg
         <EpisodeArt episode={episode} className="episode-detail-art" />
         <div>
           <p className="eyebrow">{episode.showTitle}</p>
-          <h1 id="episode-detail-title" tabIndex={-1}>{episode.title}</h1>
           <div className="episode-meta">
             <span>{formatDate(episode.pubDate)}</span>
             <EpisodeTime episode={episode} playbackState={playbackState} />
           </div>
-          <div className="episode-actions">
-            <EpisodePlayButton
-              activePlayback={activePlayback} episode={episode} playbackState={playbackState}
-              onPlayEpisode={onPlayEpisode} onToggleActivePlayback={onToggleActivePlayback}
-            />
-          </div>
         </div>
+        <EpisodePlayButton
+          activePlayback={activePlayback} episode={episode} playbackState={playbackState}
+          onPlayEpisode={onPlayEpisode} onToggleActivePlayback={onToggleActivePlayback}
+        />
       </div>
+      <h1 id="episode-detail-title" tabIndex={-1}>{episode.title}</h1>
       <div className="episode-full-description">
         {getDescriptionText(episode.description) || "No description available for this episode."}
       </div>
@@ -1270,6 +1255,7 @@ function SkipIcon({ forward = false }: { forward?: boolean }) {
 function NowPlayingBar({
   activePlayback, audioRef, onAudioEnded, onAudioLoadedMetadata, onAudioPause,
   onAudioPlay, onAudioTimeUpdate, onAudioSeeked, onJump, onTogglePlayback,
+  onScrollToTop, showScrollTop,
 }: {
   activePlayback: ActivePlayback | null;
   audioRef: RefObject<HTMLAudioElement | null>;
@@ -1281,9 +1267,31 @@ function NowPlayingBar({
   onAudioSeeked: (audio: HTMLAudioElement) => void;
   onJump: () => void;
   onTogglePlayback: () => void;
+  onScrollToTop: () => void;
+  showScrollTop: boolean;
 }) {
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
+  const dockRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    const dock = dockRef.current;
+    if (!dock) {
+      return;
+    }
+    function reserveDockSpace() {
+      document.documentElement.style.setProperty(
+        "--player-height", `${dock!.getBoundingClientRect().height}px`,
+      );
+    }
+    reserveDockSpace();
+    const observer = new ResizeObserver(reserveDockSpace);
+    observer.observe(dock);
+    return () => {
+      observer.disconnect();
+      document.documentElement.style.removeProperty("--player-height");
+    };
+  }, []);
 
   function syncPosition(audio: HTMLAudioElement) {
     setPosition(audio.currentTime || 0);
@@ -1301,13 +1309,44 @@ function NowPlayingBar({
   }
 
   return (
-    <aside aria-label="Now playing" className="now-playing-bar" hidden={!activePlayback}>
-      <button className="now-playing-copy" disabled={!activePlayback} onClick={onJump} type="button"
-        aria-label={`View details for ${activePlayback?.episode.title ?? "current episode"}`}>
-        <span>{activePlayback?.episode.showTitle ?? "GoPod"}</span>
-        <strong>{activePlayback?.episode.title ?? "No episode selected"}</strong>
-      </button>
-      <div className="now-playing-actions">
+    <aside
+      aria-label={activePlayback ? "Now playing" : "Page navigation"}
+      className={`now-playing-bar ${activePlayback ? "" : "navigation-only"}`}
+      hidden={!activePlayback && !showScrollTop}
+      ref={dockRef}
+    >
+      <div className="now-playing-header">
+        {activePlayback && (
+          <EpisodeArt episode={activePlayback.episode} className="player-art" />
+        )}
+        <button className="now-playing-copy" hidden={!activePlayback} onClick={onJump} type="button"
+          aria-label={`View details for ${activePlayback?.episode.title ?? "current episode"}`}>
+          <span>{activePlayback?.episode.showTitle ?? "GoPod"}</span>
+          <strong>{activePlayback?.episode.title ?? "No episode selected"}</strong>
+        </button>
+        <button
+          aria-label="Scroll to top"
+          aria-hidden={!showScrollTop}
+          className={`scroll-top-button ${showScrollTop ? "" : "top-button-hidden"}`}
+          onClick={(event) => {
+            // The dock can hide during the scroll; release focus before that happens.
+            event.currentTarget.blur();
+            onScrollToTop();
+          }}
+          tabIndex={showScrollTop ? 0 : -1}
+          type="button"
+        >
+          <span aria-hidden="true">↑</span> Top
+        </button>
+      </div>
+      <div className="player-timeline" hidden={!activePlayback}>
+        <span>{formatProgress(position)}</span>
+        <input aria-label="Playback position" aria-valuetext={`${formatProgress(position)} of ${formatProgress(duration)}`}
+          disabled={!duration} max={duration || 1} min={0} onChange={(event) => seekTo(Number(event.target.value))}
+          step={1} type="range" value={Math.min(position, duration)} />
+        <span>{formatProgress(duration)}</span>
+      </div>
+      <div className="now-playing-actions" hidden={!activePlayback}>
         <button aria-label="Back 30 seconds" className="player-skip-button" disabled={!activePlayback || !duration}
           onClick={() => seekTo((audioRef.current?.currentTime ?? 0) - SKIP_SECONDS)} type="button">
           <SkipIcon />
@@ -1321,13 +1360,6 @@ function NowPlayingBar({
           onClick={() => seekTo((audioRef.current?.currentTime ?? 0) + SKIP_SECONDS)} type="button">
           <SkipIcon forward />
         </button>
-      </div>
-      <div className="player-timeline">
-        <span>{formatProgress(position)}</span>
-        <input aria-label="Playback position" aria-valuetext={`${formatProgress(position)} of ${formatProgress(duration)}`}
-          disabled={!duration} max={duration || 1} min={0} onChange={(event) => seekTo(Number(event.target.value))}
-          step={1} type="range" value={Math.min(position, duration)} />
-        <span>{formatProgress(duration)}</span>
       </div>
       <audio
         onDurationChange={(event) => syncPosition(event.currentTarget)}
@@ -1665,15 +1697,16 @@ function updateMediaSession(
   updateMediaSessionState(audio, audio.paused ? "paused" : "playing");
   setMediaSessionHandler("play", controls.onPlay);
   setMediaSessionHandler("pause", controls.onPause);
-  setMediaSessionHandler("seekbackward", (details) => {
+  // Keep system media controls consistent with the in-app 30-second buttons.
+  setMediaSessionHandler("seekbackward", () => {
     audio.currentTime = Math.max(
       0,
-      audio.currentTime - (details.seekOffset ?? SKIP_SECONDS),
+      audio.currentTime - SKIP_SECONDS,
     );
     updateMediaSessionPosition(audio);
   });
-  setMediaSessionHandler("seekforward", (details) => {
-    const nextTime = audio.currentTime + (details.seekOffset ?? SKIP_SECONDS);
+  setMediaSessionHandler("seekforward", () => {
+    const nextTime = audio.currentTime + SKIP_SECONDS;
     audio.currentTime = Number.isFinite(audio.duration)
       ? Math.min(audio.duration, nextTime)
       : nextTime;
