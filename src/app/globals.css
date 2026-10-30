@@ -410,6 +410,13 @@ img {
   gap: 14px;
 }
 
+.episode-scope {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
 .episode-card {
   position: relative;
   border: 1px solid var(--border);

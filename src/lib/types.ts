@@ -5,6 +5,9 @@ export type ParsedFeed = {
   link?: string;
   imageUrl?: string;
   episodes: ParsedEpisode[];
+  recentDays?: number;
+  totalEpisodes?: number;
+  nextOffset?: number | null;
 };
 
 export type ParsedEpisode = {

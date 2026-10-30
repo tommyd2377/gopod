@@ -12,6 +12,13 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  compareEpisodes,
+  episodeTimestamp,
+  EPISODE_BATCH_SIZE,
+  recentEpisodes,
+  RECENT_EPISODE_DAYS,
+} from "@/lib/episode-catalog";
 import type {
   EpisodePlaybackState,
   ParsedEpisode,
@@ -23,10 +30,7 @@ const FEEDS_KEY = "podcastFeeds";
 const CACHE_KEY = "podcastEpisodesCache";
 const PLAYBACK_KEY = "podcastPlaybackState";
 const ALL_EPISODES_VIEW = "all";
-const EPISODE_BATCH_SIZE = 40;
 const BACKUP_VERSION = 1;
-const RECENT_EPISODE_DAYS = 7;
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const AUTO_REFRESH_STALE_MS = 15 * 60 * 1000;
 const FEED_REFRESH_CONCURRENCY = 4;
 const PROGRESS_SAVE_INTERVAL_MS = 10_000;
@@ -34,6 +38,12 @@ const SKIP_SECONDS = 30;
 
 type FeedCache = Record<string, ParsedFeed>;
 type PlaybackMap = Record<string, EpisodePlaybackState>;
+type ShowArchive = {
+  feedUrl: string;
+  episodes: ParsedEpisode[];
+  totalEpisodes: number;
+  nextOffset: number | null;
+};
 type ViewKey = typeof ALL_EPISODES_VIEW | string;
 
 type EpisodeWithShow = ParsedEpisode & {
@@ -73,7 +83,12 @@ export function GoPodApp() {
   const detailHistoryRestoredRef = useRef(false);
   const listReturnRef = useRef<{ scrollY: number; episodeKey: string } | null>(null);
   const [selectedView, setSelectedView] = useState<ViewKey>(ALL_EPISODES_VIEW);
+  const selectedViewRef = useRef<ViewKey>(ALL_EPISODES_VIEW);
   const [episodeLimit, setEpisodeLimit] = useState(EPISODE_BATCH_SIZE);
+  const [showArchive, setShowArchive] = useState<ShowArchive | null>(null);
+  const [isLoadingArchive, setIsLoadingArchive] = useState(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+  const archiveRequestRef = useRef(0);
   const [isAdding, setIsAdding] = useState(false);
   const [isRefreshingAll, setIsRefreshingAll] = useState(false);
   const [refreshingFeedUrl, setRefreshingFeedUrl] = useState<string | null>(null);
@@ -123,7 +138,7 @@ export function GoPodApp() {
 
   useEffect(() => {
     if (hydrated) {
-      writeStorage(CACHE_KEY, cache);
+      writeStorage(CACHE_KEY, pruneFeedCacheToRecentEpisodes(cache));
     }
   }, [cache, hydrated]);
 
@@ -264,21 +279,29 @@ export function GoPodApp() {
   );
 
   const selectedFeed = feeds.find((feed) => feed.feedUrl === selectedView);
+  const selectedArchive = showArchive?.feedUrl === selectedView ? showArchive : null;
   const visibleEpisodes = useMemo(() => {
     if (selectedView === ALL_EPISODES_VIEW) {
       return allEpisodes;
     }
 
+    if (selectedFeed && selectedArchive) {
+      return buildEpisodeList([selectedFeed], {
+        [selectedView]: { ...selectedFeed, episodes: selectedArchive.episodes },
+      }, false);
+    }
     return allEpisodes.filter((episode) => episode.feedUrl === selectedView);
-  }, [allEpisodes, selectedView]);
+  }, [allEpisodes, selectedView, selectedFeed, selectedArchive]);
   const displayedEpisodes = visibleEpisodes.slice(0, episodeLimit);
-  const hasMoreEpisodes = visibleEpisodes.length > displayedEpisodes.length;
+  const hasMoreEpisodes = visibleEpisodes.length > displayedEpisodes.length ||
+    Boolean(selectedArchive && selectedArchive.nextOffset !== null);
+  const episodeCount = selectedArchive?.totalEpisodes ?? visibleEpisodes.length;
   const hasLongFeedList = feeds.length > 8;
   const selectedFeedIsRefreshing = Boolean(
     selectedFeed && refreshingFeedUrl === selectedFeed.feedUrl,
   );
   const isActivelyLoadingEpisodes =
-    !hydrated || isRefreshingAll || selectedFeedIsRefreshing || isSwitchingView;
+    !hydrated || isRefreshingAll || selectedFeedIsRefreshing || isSwitchingView || isLoadingArchive;
   const selectedFeedNeedsRefresh = Boolean(
     hydrated && selectedFeed && !cache[selectedFeed.feedUrl],
   );
@@ -303,6 +326,10 @@ export function GoPodApp() {
       const key = window.history.state?.gopodEpisodeKey;
       setSelectedEpisode(
         allEpisodes.find((episode) => getEpisodeKey(episode) === key) ??
+          visibleEpisodes.find((episode) => getEpisodeKey(episode) === key) ??
+          (isEpisodeWithShow(window.history.state?.gopodEpisode) &&
+            getEpisodeKey(window.history.state.gopodEpisode) === key
+            ? window.history.state.gopodEpisode : null) ??
           (activeEpisodeKeyRef.current === key ? activeEpisodeRef.current : null),
       );
     }
@@ -313,7 +340,7 @@ export function GoPodApp() {
     }
     window.addEventListener("popstate", restoreView);
     return () => window.removeEventListener("popstate", restoreView);
-  }, [allEpisodes, hydrated]);
+  }, [allEpisodes, visibleEpisodes, hydrated]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -335,7 +362,11 @@ export function GoPodApp() {
     if (!selectedEpisode) {
       listReturnRef.current = { scrollY: window.scrollY, episodeKey };
     }
-    const nextState = { ...window.history.state, gopodEpisodeKey: episodeKey };
+    const nextState = {
+      ...window.history.state,
+      gopodEpisodeKey: episodeKey,
+      gopodEpisode: episode,
+    };
     const url = `#${getEpisodeElementId(episodeKey)}`;
     if (selectedEpisode) {
       window.history.replaceState(nextState, "", url);
@@ -629,8 +660,7 @@ export function GoPodApp() {
         ...currentCache,
         [savedFeed.feedUrl]: parsedFeed,
       }));
-      setSelectedView(savedFeed.feedUrl);
-      setEpisodeLimit(EPISODE_BATCH_SIZE);
+      selectView(savedFeed.feedUrl);
       setFeedInput("");
       setMessage(`Added ${savedFeed.title}.`);
     } catch (feedError) {
@@ -664,6 +694,9 @@ export function GoPodApp() {
         ...currentCache,
         [nextSavedFeed.feedUrl]: parsedFeed,
       }));
+      if (selectedViewRef.current === feedUrl) {
+        void loadShowArchive(feedUrl);
+      }
       setMessage(`Refreshed ${nextSavedFeed.title}.`);
     } catch (feedError) {
       setError(getErrorMessage(feedError));
@@ -688,6 +721,9 @@ export function GoPodApp() {
     setFeeds(result.nextFeeds);
     setCache(result.nextCache);
     setIsRefreshingAll(false);
+    if (selectedViewRef.current !== ALL_EPISODES_VIEW) {
+      void loadShowArchive(selectedViewRef.current);
+    }
 
     if (result.failedFeeds.length > 0) {
       setError(getRefreshFailureMessage(result.failedFeeds.length));
@@ -713,6 +749,8 @@ export function GoPodApp() {
     });
 
     if (selectedView === feedUrl) {
+      resetShowArchive();
+      selectedViewRef.current = ALL_EPISODES_VIEW;
       setSelectedView(ALL_EPISODES_VIEW);
       setEpisodeLimit(EPISODE_BATCH_SIZE);
     }
@@ -721,14 +759,75 @@ export function GoPodApp() {
     setError(null);
   }
 
+  function resetShowArchive() {
+    archiveRequestRef.current += 1;
+    setShowArchive(null);
+    setArchiveError(null);
+    setIsLoadingArchive(false);
+  }
+
+  async function loadShowArchive(feedUrl: string, offset = 0) {
+    const requestId = ++archiveRequestRef.current;
+    setIsLoadingArchive(true);
+    setArchiveError(null);
+    if (offset === 0) {
+      setShowArchive(null);
+      setEpisodeLimit(EPISODE_BATCH_SIZE);
+    }
+    try {
+      const page = await loadFeed(feedUrl, offset);
+      if (requestId !== archiveRequestRef.current) {
+        return;
+      }
+      setShowArchive((current) => {
+        const previous = offset > 0 && current?.feedUrl === feedUrl
+          ? current.episodes : [];
+        const episodes = Array.from(new Map(
+          [...previous, ...page.episodes].map((episode) => [getEpisodeKey(episode), episode]),
+        ).values());
+        return {
+          feedUrl,
+          episodes,
+          totalEpisodes: page.totalEpisodes ?? episodes.length,
+          nextOffset: page.nextOffset ?? null,
+        };
+      });
+      if (offset > 0) {
+        setEpisodeLimit((current) => current + EPISODE_BATCH_SIZE);
+      }
+    } catch (feedError) {
+      if (requestId === archiveRequestRef.current) {
+        setArchiveError(getErrorMessage(feedError));
+      }
+    } finally {
+      if (requestId === archiveRequestRef.current) {
+        setIsLoadingArchive(false);
+      }
+    }
+  }
+
+  function showMoreEpisodes() {
+    if (displayedEpisodes.length < visibleEpisodes.length) {
+      setEpisodeLimit((current) => current + EPISODE_BATCH_SIZE);
+    } else if (selectedArchive && selectedArchive.nextOffset !== null) {
+      void loadShowArchive(selectedArchive.feedUrl, selectedArchive.nextOffset);
+    }
+  }
+
   function selectView(view: ViewKey) {
     if (viewSwitchTimerRef.current) {
       clearTimeout(viewSwitchTimerRef.current);
     }
 
     setIsSwitchingView(true);
+    selectedViewRef.current = view;
     setSelectedView(view);
     setEpisodeLimit(EPISODE_BATCH_SIZE);
+    if (view === ALL_EPISODES_VIEW) {
+      resetShowArchive();
+    } else {
+      void loadShowArchive(view);
+    }
     viewSwitchTimerRef.current = setTimeout(() => {
       setIsSwitchingView(false);
     }, 180);
@@ -791,7 +890,9 @@ export function GoPodApp() {
 
       setFeeds([...backup.podcastFeeds].sort(sortFeedsByTitle));
       setCache(backup.podcastEpisodesCache);
+      resetShowArchive();
       storePlayback(backup.podcastPlaybackState);
+      selectedViewRef.current = ALL_EPISODES_VIEW;
       setSelectedView(ALL_EPISODES_VIEW);
       setEpisodeLimit(EPISODE_BATCH_SIZE);
       setMessage(`Imported ${backup.podcastFeeds.length} saved feeds.`);
@@ -970,12 +1071,20 @@ export function GoPodApp() {
               <h2>
                 {showEpisodeLoadingState
                   ? "Loading episodes"
-                  : visibleEpisodes.length === 1
+                  : episodeCount === 1
                   ? "1 episode"
-                  : `${visibleEpisodes.length} episodes`}
+                  : `${episodeCount} episodes`}
               </h2>
             </div>
           </div>
+
+          {hydrated && feeds.length > 0 && (
+            <p className="episode-scope">
+              {selectedFeed
+                ? "Browse this show’s available episodes, newest first."
+                : `New episodes from the last ${RECENT_EPISODE_DAYS} days.`}
+            </p>
+          )}
 
           {!hydrated && <EmptyState text="Loading your saved feeds." />}
 
@@ -1004,8 +1113,24 @@ export function GoPodApp() {
             visibleEpisodes.length === 0 &&
             !showEpisodeLoadingState &&
             !selectedFeedNeedsRefresh &&
-            !allEpisodesNeedRefresh && (
-            <EmptyState text="No episodes found." />
+            !allEpisodesNeedRefresh &&
+            !archiveError && (
+            <EmptyState text={selectedFeed
+              ? "No episodes found in this feed."
+              : `No episodes published in the last ${RECENT_EPISODE_DAYS} days. Open a show to browse older episodes.`} />
+          )}
+
+          {archiveError && selectedFeed && (
+            <div className="notice error-notice" role="alert">
+              <p>{archiveError}</p>
+              <button
+                className="button secondary-button"
+                onClick={() => loadShowArchive(selectedFeed.feedUrl, selectedArchive?.nextOffset ?? 0)}
+                type="button"
+              >
+                Try again
+              </button>
+            </div>
           )}
 
           <div className="episode-list">
@@ -1024,17 +1149,11 @@ export function GoPodApp() {
             {hasMoreEpisodes && (
               <button
                 className="button secondary-button load-more-button"
-                onClick={() =>
-                  setEpisodeLimit((currentLimit) =>
-                    Math.min(
-                      currentLimit + EPISODE_BATCH_SIZE,
-                      visibleEpisodes.length,
-                    ),
-                  )
-                }
+                disabled={isLoadingArchive}
+                onClick={showMoreEpisodes}
                 type="button"
               >
-                Show more
+                {isLoadingArchive ? "Loading episodes..." : selectedFeed ? "Load older episodes" : "Show more"}
               </button>
             )}
           </div>
@@ -1424,7 +1543,7 @@ function getFeedEpisodeLabel(
     return "Refreshing...";
   }
 
-  const episodeCount = cache[feed.feedUrl]?.episodes.length;
+  const episodeCount = cache[feed.feedUrl]?.totalEpisodes ?? cache[feed.feedUrl]?.episodes.length;
 
   if (typeof episodeCount !== "number") {
     return "Not loaded";
@@ -1445,8 +1564,13 @@ function getEpisodePlayLabel(
   return playbackState?.progress ? "Resume" : "Play";
 }
 
-async function loadFeed(feedUrl: string) {
-  const response = await fetch(`/api/feed?url=${encodeURIComponent(feedUrl)}`);
+async function loadFeed(feedUrl: string, archiveOffset?: number) {
+  const query = new URLSearchParams({ url: feedUrl });
+  if (archiveOffset !== undefined) {
+    query.set("view", "archive");
+    query.set("offset", String(archiveOffset));
+  }
+  const response = await fetch(`/api/feed?${query}`);
   const payload = (await response.json().catch(() => null)) as {
     error?: string;
   } | null;
@@ -1531,9 +1655,8 @@ function sortFeedsByTitle(a: SavedFeed, b: SavedFeed) {
   return a.title.localeCompare(b.title);
 }
 
-function buildEpisodeList(feeds: SavedFeed[], cache: FeedCache) {
+function buildEpisodeList(feeds: SavedFeed[], cache: FeedCache, recentOnly = true) {
   const episodesByKey = new Map<string, EpisodeWithShow>();
-  const cutoff = getRecentEpisodeCutoff();
 
   for (const feed of feeds) {
     const parsedFeed = cache[feed.feedUrl];
@@ -1542,11 +1665,8 @@ function buildEpisodeList(feeds: SavedFeed[], cache: FeedCache) {
       continue;
     }
 
-    for (const episode of parsedFeed.episodes) {
-      if (!isRecentEpisode(episode.pubDate, cutoff)) {
-        continue;
-      }
-
+    const episodes = recentOnly ? recentEpisodes(parsedFeed.episodes) : parsedFeed.episodes;
+    for (const episode of episodes) {
       const key = getEpisodeKey(episode);
 
       if (!episodesByKey.has(key)) {
@@ -1560,31 +1680,14 @@ function buildEpisodeList(feeds: SavedFeed[], cache: FeedCache) {
     }
   }
 
-  return Array.from(episodesByKey.values()).sort((a, b) => {
-    const aDate = getSortableDate(a.pubDate);
-    const bDate = getSortableDate(b.pubDate);
-
-    if (aDate !== bDate) {
-      return bDate - aDate;
-    }
-
-    return a.title.localeCompare(b.title);
-  });
+  return Array.from(episodesByKey.values()).sort(compareEpisodes);
 }
 
 function pruneFeedCacheToRecentEpisodes(cache: FeedCache) {
-  const cutoff = getRecentEpisodeCutoff();
   const nextCache: FeedCache = {};
-
   for (const [feedUrl, feed] of Object.entries(cache)) {
-    nextCache[feedUrl] = {
-      ...feed,
-      episodes: feed.episodes.filter((episode) =>
-        isRecentEpisode(episode.pubDate, cutoff),
-      ),
-    };
+    nextCache[feedUrl] = { ...feed, episodes: recentEpisodes(feed.episodes) };
   }
-
   return nextCache;
 }
 
@@ -1603,24 +1706,11 @@ function getEpisodeElementId(episodeKey: string) {
 }
 
 function getSortableDate(pubDate?: string) {
-  if (!pubDate) {
-    return 0;
-  }
-
-  const time = new Date(pubDate).getTime();
-  return Number.isNaN(time) ? 0 : time;
-}
-
-function getRecentEpisodeCutoff() {
-  return Date.now() - RECENT_EPISODE_DAYS * MS_PER_DAY;
-}
-
-function isRecentEpisode(pubDate: string | undefined, cutoff: number) {
-  return getSortableDate(pubDate) >= cutoff;
+  return episodeTimestamp(pubDate);
 }
 
 function feedNeedsAutoRefresh(feed: SavedFeed, cache: FeedCache) {
-  if (!cache[feed.feedUrl]) {
+  if (!cache[feed.feedUrl] || cache[feed.feedUrl].recentDays !== RECENT_EPISODE_DAYS) {
     return true;
   }
 
@@ -1925,6 +2015,12 @@ function isParsedFeed(value: unknown): value is ParsedFeed {
     typeof value.title === "string" &&
     Array.isArray(value.episodes)
   );
+}
+
+function isEpisodeWithShow(value: unknown): value is EpisodeWithShow {
+  return isRecord(value) && typeof value.guid === "string" &&
+    typeof value.audioUrl === "string" && typeof value.title === "string" &&
+    typeof value.feedUrl === "string" && typeof value.showTitle === "string";
 }
 
 function isPlaybackState(value: unknown): value is EpisodePlaybackState {

@@ -2,14 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { parsePodcastFeed, FeedParseError } from "@/lib/feed-parser";
 import { ensurePublicFeedUrl, parseFeedUrl } from "@/lib/feed-security";
 import type { ParsedFeed } from "@/lib/types";
+import { archivePage, recentEpisodes, RECENT_EPISODE_DAYS } from "@/lib/episode-catalog";
 
 export const runtime = "nodejs";
 
 const FEED_TIMEOUT_MS = 10_000;
 const MAX_REDIRECTS = 5;
 const FEED_RETRY_COUNT = 2;
-const RECENT_EPISODE_DAYS = 7;
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 class FeedRequestError extends Error {
   constructor(
@@ -28,12 +27,21 @@ export async function GET(request: NextRequest) {
     return errorResponse(validation.error, validation.status);
   }
 
+  const archive = request.nextUrl.searchParams.get("view") === "archive";
+  const rawOffset = request.nextUrl.searchParams.get("offset") ?? "0";
+  const offset = Number(rawOffset);
+  if (archive && (!/^\d+$/.test(rawOffset) || !Number.isSafeInteger(offset))) {
+    return errorResponse("Invalid episode offset.", 400);
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FEED_TIMEOUT_MS);
 
   try {
     const parsedFeed = await loadAndParseFeed(validation.url, controller.signal);
-    return NextResponse.json(parsedFeed);
+    return NextResponse.json(archive
+      ? archivePage(parsedFeed, offset)
+      : limitFeedToRecentEpisodes(parsedFeed));
   } catch (error) {
     if (error instanceof FeedRequestError) {
       return errorResponse(error.message, error.status);
@@ -65,7 +73,7 @@ async function loadAndParseFeed(url: URL, signal: AbortSignal) {
     const xml = await fetchFeedXml(url, signal);
 
     try {
-      return limitFeedToRecentEpisodes(parsePodcastFeed(xml, url.toString()));
+      return parsePodcastFeed(xml, url.toString());
     } catch (error) {
       if (
         error instanceof FeedParseError &&
@@ -84,23 +92,12 @@ async function loadAndParseFeed(url: URL, signal: AbortSignal) {
 }
 
 function limitFeedToRecentEpisodes(feed: ParsedFeed): ParsedFeed {
-  const cutoff = Date.now() - RECENT_EPISODE_DAYS * MS_PER_DAY;
-
   return {
     ...feed,
-    episodes: feed.episodes.filter((episode) =>
-      isRecentEpisode(episode.pubDate, cutoff),
-    ),
+    episodes: recentEpisodes(feed.episodes),
+    recentDays: RECENT_EPISODE_DAYS,
+    totalEpisodes: new Set(feed.episodes.map((episode) => episode.guid || episode.audioUrl)).size,
   };
-}
-
-function isRecentEpisode(pubDate: string | undefined, cutoff: number) {
-  if (!pubDate) {
-    return false;
-  }
-
-  const time = new Date(pubDate).getTime();
-  return !Number.isNaN(time) && time >= cutoff;
 }
 
 async function fetchFeedXml(url: URL, signal: AbortSignal) {

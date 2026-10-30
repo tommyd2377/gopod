@@ -7,7 +7,8 @@ Production: https://podcast-app-livid.vercel.app/
 ## Features
 
 - Add podcast RSS feed URLs directly.
-- View all recent episodes together or filter by show.
+- View the last 14 days of episodes together, or open a show to browse its RSS back catalog.
+- Load older show episodes in batches of 40, without an age cutoff.
 - Play episodes with a persistent now-playing bar.
 - Resume episodes from saved playback progress.
 - Refresh individual feeds or all saved feeds.
@@ -62,5 +63,10 @@ GoPod stores its app state in browser `localStorage`:
 - saved podcast feeds
 - recent parsed episode cache
 - playback progress and played state
+
+The persistent episode cache contains only the last 14 days. Older show pages are fetched
+on demand and kept in memory for the selected show; switching shows releases those pages.
+Listening progress is stored separately and is retained for older episodes. A show's
+available history is limited to the episodes its publisher includes in the RSS feed.
 
 Use the built-in export/import controls to move that local state between browsers or keep a backup.
